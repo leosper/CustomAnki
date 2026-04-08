@@ -35,6 +35,7 @@ class Database:
                 deck_id INTEGER,
                 front TEXT NOT NULL,
                 back TEXT NOT NULL,
+                reps INTEGER DEFAULT 0,
                 interval INTEGER DEFAULT 0,
                 ease_factor REAL DEFAULT 2.5,
                 due_date TEXT,
@@ -85,7 +86,7 @@ class Database:
         cursor = self.conn.cursor()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if deck_id:
-            cursor.execute("SELECT * FROM cards WHERE due_date <= ? AND deck_id = ?", (now, deck_id))
+            cursor.execute("SELECT * FROM cards WHERE due_date <= ? AND deck_id = ? ORDER BY RANDOM()", (now, deck_id))
         else:
-            cursor.execute("SELECT * FROM cards WHERE due_date <= ?", (now,))
+            cursor.execute("SELECT * FROM cards WHERE due_date <= ? ORDER BY RANDOM()", (now,))
         return cursor.fetchall()

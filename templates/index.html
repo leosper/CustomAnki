@@ -59,8 +59,17 @@
                         <button class="btn btn-primary" id="btn-check">Check</button>
                     </div>
                     <div id="feedback"></div>
+                    <div id="srs-controls" class="text-center mt-3" style="display: none;">
+                        <p class="small text-muted mb-2">How easy was this?</p>
+                        <div class="btn-group w-100">
+                            <button class="btn btn-danger" onclick="rateCard(0)">Again</button>
+                            <button class="btn btn-warning" onclick="rateCard(1)">Hard</button>
+                            <button class="btn btn-primary" onclick="rateCard(2)">Good</button>
+                            <button class="btn btn-success" onclick="rateCard(3)">Easy</button>
+                        </div>
+                    </div>
                     <div class="text-center mt-3">
-                        <button class="btn btn-outline-secondary" id="btn-next" style="display: none;">Next Card</button>
+                        <button class="btn btn-outline-secondary btn-custom" id="btn-next" style="display: none;">Next Card</button>
                     </div>
                 </div>
             </div>
@@ -181,7 +190,7 @@
         const data = await response.json();
         const feedback = document.getElementById('feedback');
         feedback.style.display = 'none';
-        document.getElementById('btn-next').style.display = 'none';
+        document.getElementById('srs-controls').style.display = 'none';
         document.getElementById('user-answer').disabled = false;
         document.getElementById('user-answer').value = '';
 
@@ -192,6 +201,7 @@
             document.getElementById('display-question').innerText = data.front;
             currentCardId = data.id;
             document.getElementById('input-area').style.display = 'flex';
+            document.getElementById('user-answer').focus();
         }
     }
 
@@ -211,9 +221,20 @@
         const data = await response.json();
         feedback.innerHTML = data.result;
         feedback.className = data.correct ? "alert alert-success" : "alert alert-warning";
-        document.getElementById('btn-next').style.display = "inline-block";
+        
+        // Показываем кнопки оценки сложности
+        document.getElementById('srs-controls').style.display = "block";
         document.getElementById('user-answer').disabled = true;
     });
+
+    async function rateCard(rating) {
+        await fetch('/api/rate', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: currentCardId, rating: rating})
+        });
+        loadNextCard();
+    }
 
     document.getElementById('btn-generate').addEventListener('click', async () => {
         const topic = document.getElementById('gen-topic').value;
@@ -244,12 +265,25 @@
 
     document.getElementById('btn-next').addEventListener('click', loadNextCard);
     
-    // Support Enter key for Review
+    // Support Hotkeys (Enter and Numbers 1-4)
+    document.addEventListener('keydown', (e) => {
+        const srsControls = document.getElementById('srs-controls');
+        const isSrsVisible = srsControls.style.display === 'block';
+
+        if (isSrsVisible) {
+            if (e.key === '1') rateCard(0);
+            if (e.key === '2') rateCard(1);
+            if (e.key === '3') rateCard(2);
+            if (e.key === '4') rateCard(3);
+        }
+    });
+
     document.getElementById('user-answer').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') {
-            const nextBtn = document.getElementById('btn-next');
-            if (nextBtn.style.display === 'inline-block') {
-                nextBtn.click();
+            const srsControls = document.getElementById('srs-controls');
+            if (srsControls.style.display === 'block') {
+                // Если ответ уже проверен, Enter по умолчанию выбирает 'Good' (2)
+                rateCard(2);
             } else {
                 document.getElementById('btn-check').click();
             }

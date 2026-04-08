@@ -9,14 +9,13 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 app.secret_key = "super_secret_custom_anki_key"
 
-# Загружаем настройки
 with open("config.json", "r") as f:
     config = json.load(f)
 
 db = Database()
 ai = AIService()
 
-# Настройка OAuth для Google
+# OAuth setup
 oauth = OAuth(app)
 google = oauth.register(
     name='google',
@@ -30,43 +29,28 @@ def get_session_key():
     key = session.get('api_key')
     if not key and 'user' in session:
         key = config.get('api_key')
-    
-    # Проверка на пустые значения или плейсхолдеры
     if not key or "YOUR_" in str(key):
         return None
     return key
 
 def get_active_deck():
-    """Возвращает ID текущей выбранной колоды, проверяя её существование."""
     deck_id = session.get('active_deck_id')
-    decks = db.get_decks() # Список кортежей (id, name, ...)
-    
-    if not decks:
-        return None # База пуста (хотя у нас есть авто-создание)
-
-    # Проверяем, существует ли сохраненный в сессии ID
+    decks = db.get_decks()
+    if not decks: return None
     deck_exists = any(d[0] == deck_id for d in decks)
-    
     if not deck_id or not deck_exists:
-        # Если ID нет или колода удалена, берем ID первой доступной колоды
         first_deck_id = decks[0][0]
         session['active_deck_id'] = first_deck_id
         return first_deck_id
-        
     return deck_id
 
 @app.context_processor
 def inject_globals():
-    """Добавляет переменные во все шаблоны."""
-    return {
-        'active_deck_id': get_active_deck(),
-        'user': session.get('user')
-    }
+    return {'active_deck_id': get_active_deck(), 'user': session.get('user')}
 
 @app.route('/')
 def index():
-    if not get_session_key() and 'user' not in session:
-        return redirect(url_for('login'))
+    if not get_session_key() and 'user' not in session: return redirect(url_for('login'))
     return render_template('index.html')
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -80,97 +64,125 @@ def login():
 
 @app.route('/login/google')
 def login_google():
-    redirect_uri = url_for('auth', _external=True)
-    return google.authorize_redirect(redirect_uri)
+    return google.authorize_redirect(url_for('auth', _external=True))
 
 @app.route('/auth')
 def auth():
     token = google.authorize_access_token()
-    user = token.get('userinfo')
-    if user:
-        session['user'] = user
-        session.permanent = True
+    session['user'] = token.get('userinfo')
+    session.permanent = True
     return redirect(url_for('index'))
 
 @app.route('/logout')
 def logout():
     session.pop('api_key', None)
     session.pop('user', None)
-    session.pop('active_deck_id', None)
     return redirect(url_for('login'))
 
-# DECK MANAGEMENT
-@app.route('/api/decks', methods=['GET'])
-def list_decks():
-    if not get_session_key(): return jsonify({"status": "error"}), 401
-    decks = db.get_decks()
-    # decks is a list of tuples: (id, name, description, card_count)
-    return jsonify({
-        "status": "success",
-        "decks": [{"id": d[0], "name": d[1], "description": d[2], "cards": d[3]} for d in decks],
-        "active_id": get_active_deck()
-    })
-
-@app.route('/api/decks/select', methods=['POST'])
-def select_deck():
-    deck_id = request.json.get('id')
-    session['active_deck_id'] = int(deck_id)
-    return jsonify({"status": "success"})
-
-@app.route('/api/decks/add', methods=['POST'])
-def add_deck():
+# SRS LOGIC (SM-2 Simplified)
+@app.route('/api/rate', methods=['POST'])
+def rate_card():
     data = request.json
-    deck_id = db.add_deck(data.get('name'), data.get('description', ''))
-    return jsonify({"status": "success", "id": deck_id})
-
-@app.route('/api/decks/delete', methods=['POST'])
-def delete_deck():
-    deck_id = int(request.json.get('id'))
+    card_id = data.get('id')
+    rating = int(data.get('rating')) # 0: Again, 1: Hard, 2: Good, 3: Easy
     
-    # Защита от удаления последней колоды
-    decks = db.get_decks()
-    if len(decks) <= 1:
-        return jsonify({"status": "error", "message": "Cannot delete the last deck."})
+    cursor = db.conn.cursor()
+    cursor.execute("SELECT * FROM cards WHERE id = ?", (card_id,))
+    card = cursor.fetchone()
+    if not card: return jsonify({"status": "error"}), 404
 
-    if deck_id == get_active_deck():
-        # Если удаляем активную, переключаемся на любую другую оставшуюся
-        other_decks = [d for d in decks if d[0] != deck_id]
-        session['active_deck_id'] = other_decks[0][0]
+    # Поля в БД: id[0], deck_id[1], front[2], back[3], reps[4], interval[5], ease_factor[6], due_date[7]
+    reps = card[4]
+    interval = card[5]
+    ease_factor = card[6]
+
+    if rating >= 1: # Вспомнил (Hard, Good, Easy)
+        if reps == 0:
+            interval = 1
+        elif reps == 1:
+            interval = 6
+        else:
+            interval = round(interval * ease_factor)
         
-    db.delete_deck(deck_id)
-    return jsonify({"status": "success"})
+        reps += 1
+        # Изменяем коэффициент сложности (Ease Factor)
+        # Формула упрощена: Easy повышает EF, Hard понижает.
+        if rating == 3: ease_factor += 0.15 # Easy
+        if rating == 1: ease_factor -= 0.20 # Hard
+    else: # Забыл (Again)
+        reps = 0
+        interval = 0 # Показать сегодня
+        ease_factor -= 0.20
 
-# CARDS
+    # Ограничения
+    if ease_factor < 1.3: ease_factor = 1.3
+    
+    new_due = (datetime.now() + timedelta(days=interval)).strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        UPDATE cards 
+        SET reps = ?, interval = ?, ease_factor = ?, due_date = ? 
+        WHERE id = ?
+    """, (reps, interval, ease_factor, new_due, card_id))
+    db.conn.commit()
+    
+    return jsonify({"status": "success", "next_interval": interval})
+
 @app.route('/api/get_card', methods=['GET'])
 def get_card():
-    if not get_session_key(): return jsonify({"status": "error"}), 401
     deck_id = get_active_deck()
     cards = db.get_due_cards(deck_id)
     if not cards: return jsonify({"status": "empty"})
-    card = cards[0]
-    return jsonify({"status": "success", "id": card[0], "front": card[2]})
+    return jsonify({"status": "success", "id": cards[0][0], "front": cards[0][2]})
 
 @app.route('/api/check', methods=['POST'])
 def check_answer():
     api_key = get_session_key()
     data = request.json
+    card_id = data.get('id')
+    user_ans_raw = data.get('answer', '')
+    user_ans = user_ans_raw.strip().lower()
+    
     cursor = db.conn.cursor()
-    cursor.execute("SELECT * FROM cards WHERE id = ?", (data.get('id'),))
+    cursor.execute("SELECT * FROM cards WHERE id = ?", (card_id,))
     card = cursor.fetchone()
-    result = ai.check_answer(api_key, card[2], card[3], data.get('answer'))
-    new_due = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
-    cursor.execute("UPDATE cards SET due_date = ? WHERE id = ?", (new_due, data.get('id')))
-    db.conn.commit()
-    return jsonify({"status": "success", "result": result, "correct": "YES" in result.upper()})
+    if not card: return jsonify({"status": "error"})
+    
+    correct_ans = card[3].strip().lower()
+    
+    # 1. Мгновенная проверка (если включено в конфиге)
+    if config.get("fast_check", False) and user_ans == correct_ans:
+        return jsonify({
+            "status": "success", 
+            "result": f"✅ Correct! (Fast check match: {card[3]})", 
+            "correct": True
+        })
+
+    # 2. AI проверка (всегда срабатывает если fast_check=false или если ответы не совпали)
+    result = ai.check_answer(api_key, card[2], card[3], user_ans_raw)
+    return jsonify({
+        "status": "success", 
+        "result": result, 
+        "correct": "YES" in result.upper()
+    })
+
+@app.route('/api/decks', methods=['GET'])
+def list_decks():
+    decks = db.get_decks()
+    return jsonify({"status": "success", "decks": [{"id": d[0], "name": d[1], "cards": d[3]} for d in decks], "active_id": get_active_deck()})
+
+@app.route('/api/decks/select', methods=['POST'])
+def select_deck():
+    session['active_deck_id'] = int(request.json.get('id'))
+    return jsonify({"status": "success"})
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
     api_key = get_session_key()
     topic = request.json.get('topic')
-    deck_id = get_active_deck()
     try:
         new_cards = ai.generate_cards(api_key, topic, count=5)
-        for f, b in new_cards: db.add_card(deck_id, f, b)
+        for f, b in new_cards: db.add_card(get_active_deck(), f, b)
         return jsonify({"status": "success", "count": len(new_cards)})
     except Exception as e: return jsonify({"status": "error", "message": str(e)})
 
