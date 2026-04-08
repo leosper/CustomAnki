@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CustomAnki AI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f8f9fa; font-family: 'Segoe UI', sans-serif; }
+        .card-container { max-width: 600px; margin: 20px auto; padding: 20px; background: white; border-radius: 15px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .question { font-size: 1.5rem; font-weight: bold; color: #2c3e50; text-align: center; margin-bottom: 20px; }
+        #feedback { margin-top: 15px; padding: 10px; border-radius: 5px; display: none; }
+        .btn-custom { border-radius: 10px; padding: 10px 20px; }
+        .deck-item { border: 1px solid #ddd; padding: 15px; border-radius: 10px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; transition: 0.2s; }
+        .deck-item:hover { border-color: #007bff; background: #f0f7ff; }
+        .deck-active { border: 2px solid #007bff; background: #f0f7ff; }
+        .user-info { font-size: 0.9rem; color: #fff; }
+    </style>
+</head>
+<body>
+
+<nav class="navbar navbar-dark bg-primary mb-4">
+    <div class="container d-flex justify-content-between align-items-center">
+        <span class="navbar-brand mb-0 h1">CustomAnki AI SRS</span>
+        <div class="d-flex align-items-center">
+            {% if user %}
+            <span class="user-info me-3">Welcome, {{ user.name }}</span>
+            {% endif %}
+            <a href="/logout" class="btn btn-outline-light btn-sm">Logout</a>
+        </div>
+    </div>
+</nav>
+
+<div class="container text-center mb-3">
+    <h5 id="active-deck-name" class="text-primary">Loading active deck...</h5>
+</div>
+
+<div class="container">
+    <ul class="nav nav-pills justify-content-center mb-4" id="pills-tab" role="tablist">
+        <li class="nav-item">
+            <button class="nav-link active" id="pills-review-tab" data-bs-toggle="pill" data-bs-target="#pills-review" type="button" role="tab">Review</button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" id="pills-decks-tab" data-bs-toggle="pill" data-bs-target="#pills-decks" type="button" role="tab">Decks</button>
+        </li>
+        <li class="nav-item">
+            <button class="nav-link" id="pills-generate-tab" data-bs-toggle="pill" data-bs-target="#pills-generate" type="button" role="tab">Generate</button>
+        </li>
+    </ul>
+
+    <div class="tab-content" id="pills-tabContent">
+        <!-- REVIEW TAB -->
+        <div class="tab-pane fade show active" id="pills-review" role="tabpanel">
+            <div class="card-container">
+                <div id="card-content">
+                    <div class="question" id="display-question">Loading...</div>
+                    <div class="input-group mb-3" id="input-area">
+                        <input type="text" id="user-answer" class="form-control" placeholder="Your answer..." autocomplete="off">
+                        <button class="btn btn-primary" id="btn-check">Check</button>
+                    </div>
+                    <div id="feedback"></div>
+                    <div class="text-center mt-3">
+                        <button class="btn btn-outline-secondary" id="btn-next" style="display: none;">Next Card</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- DECKS TAB -->
+        <div class="tab-pane fade" id="pills-decks" role="tabpanel">
+            <div class="card-container">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h4>Your Decks</h4>
+                    <button class="btn btn-success btn-sm" data-bs-toggle="modal" data-bs-target="#addDeckModal">+ New Deck</button>
+                </div>
+                <div id="decks-list">
+                    <!-- Decks will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="pills-generate" role="tabpanel">
+            <div class="card-container text-center">
+                <h3>Generate Cards</h3>
+                <p class="text-muted">Enter a topic or a detailed prompt (e.g., "5 Spanish verbs with examples").</p>
+                <div class="mb-3">
+                    <textarea id="gen-topic" class="form-control" rows="5" placeholder="Describe what cards you want to create..."></textarea>
+                </div>
+                <button class="btn btn-success btn-custom w-100" id="btn-generate">Generate</button>
+                <div id="gen-status" class="mt-3"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal for New Deck -->
+<div class="modal fade" id="addDeckModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header"><h5>Create New Deck</h5></div>
+            <div class="modal-body">
+                <input type="text" id="new-deck-name" class="form-control mb-2" placeholder="Deck Name">
+                <input type="text" id="new-deck-desc" class="form-control" placeholder="Description (Optional)">
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button class="btn btn-primary" id="btn-save-deck">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    let currentCardId = null;
+    let activeDeckId = null;
+
+    async function loadDecks() {
+        const response = await fetch('/api/decks');
+        const data = await response.json();
+        const list = document.getElementById('decks-list');
+        list.innerHTML = '';
+        activeDeckId = data.active_id;
+
+        data.decks.forEach(deck => {
+            const isActive = deck.id === data.active_id;
+            if (isActive) document.getElementById('active-deck-name').innerText = `Active Deck: ${deck.name}`;
+
+            const div = document.createElement('div');
+            div.className = `deck-item ${isActive ? 'deck-active' : ''}`;
+            div.innerHTML = `
+                <div>
+                    <strong>${deck.name}</strong><br>
+                    <small class="text-muted">${deck.cards} cards - ${deck.description}</small>
+                </div>
+                <div>
+                    ${!isActive ? `<button class="btn btn-primary btn-sm me-1" onclick="selectDeck(${deck.id})">Select</button>` : '<span class="badge bg-success me-1">Active</span>'}
+                    <button class="btn btn-danger btn-sm" onclick="deleteDeck(${deck.id})">Delete</button>
+                </div>
+            `;
+            list.appendChild(div);
+        });
+    }
+
+    async function selectDeck(id) {
+        await fetch('/api/decks/select', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: id})
+        });
+        loadDecks();
+        loadNextCard();
+    }
+
+    async function deleteDeck(id) {
+        if (!confirm('Are you sure? All cards in this deck will be deleted!')) return;
+        await fetch('/api/decks/delete', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: id})
+        });
+        loadDecks();
+    }
+
+    document.getElementById('btn-save-deck').addEventListener('click', async () => {
+        const name = document.getElementById('new-deck-name').value;
+        const desc = document.getElementById('new-deck-desc').value;
+        if (!name) return;
+        await fetch('/api/decks/add', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({name: name, description: desc})
+        });
+        document.getElementById('new-deck-name').value = '';
+        bootstrap.Modal.getInstance(document.getElementById('addDeckModal')).hide();
+        loadDecks();
+    });
+
+    async function loadNextCard() {
+        const response = await fetch('/api/get_card');
+        const data = await response.json();
+        const feedback = document.getElementById('feedback');
+        feedback.style.display = 'none';
+        document.getElementById('btn-next').style.display = 'none';
+        document.getElementById('user-answer').disabled = false;
+        document.getElementById('user-answer').value = '';
+
+        if (data.status === 'empty') {
+            document.getElementById('display-question').innerText = "No cards to review in this deck! 🎉";
+            document.getElementById('input-area').style.display = 'none';
+        } else {
+            document.getElementById('display-question').innerText = data.front;
+            currentCardId = data.id;
+            document.getElementById('input-area').style.display = 'flex';
+        }
+    }
+
+    document.getElementById('btn-check').addEventListener('click', async () => {
+        const ans = document.getElementById('user-answer').value;
+        if (!ans) return;
+        const feedback = document.getElementById('feedback');
+        feedback.innerHTML = "Checking... 🧠";
+        feedback.className = "alert alert-info";
+        feedback.style.display = "block";
+
+        const response = await fetch('/api/check', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id: currentCardId, answer: ans})
+        });
+        const data = await response.json();
+        feedback.innerHTML = data.result;
+        feedback.className = data.correct ? "alert alert-success" : "alert alert-warning";
+        document.getElementById('btn-next').style.display = "inline-block";
+        document.getElementById('user-answer').disabled = true;
+    });
+
+    document.getElementById('btn-generate').addEventListener('click', async () => {
+        const topic = document.getElementById('gen-topic').value;
+        if (!topic) return;
+        const status = document.getElementById('gen-status');
+        status.innerHTML = '<div class="spinner-border text-success" role="status"></div><br>Gemini is working... 🪄';
+        
+        try {
+            const response = await fetch('/api/generate', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({topic: topic})
+            });
+            const data = await response.json();
+            
+            if (data.status === 'success') {
+                status.innerHTML = `<div class="alert alert-success">Added ${data.count} cards!</div>`;
+                document.getElementById('gen-topic').value = '';
+                loadDecks(); 
+                loadNextCard();
+            } else {
+                status.innerHTML = `<div class="alert alert-danger">Error: ${data.message}</div>`;
+            }
+        } catch (e) {
+            status.innerHTML = `<div class="alert alert-danger">Critical Error: ${e}</div>`;
+        }
+    });
+
+    document.getElementById('btn-next').addEventListener('click', loadNextCard);
+    
+    // Support Enter key for Review
+    document.getElementById('user-answer').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+            const nextBtn = document.getElementById('btn-next');
+            if (nextBtn.style.display === 'inline-block') {
+                nextBtn.click();
+            } else {
+                document.getElementById('btn-check').click();
+            }
+        }
+    });
+
+    // Support Enter key for Generate (Shift+Enter for new line)
+    document.getElementById('gen-topic').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            document.getElementById('btn-generate').click();
+        }
+    });
+    
+    // Init
+    loadDecks();
+    loadNextCard();
+</script>
+</body>
+</html>
